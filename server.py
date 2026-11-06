@@ -27,7 +27,7 @@ CAPTURE_ENABLED = os.environ.get("CAPTURE_ENABLED", "0").lower() in {"1", "true"
 BIND_HOST = os.environ.get("MCP_BIND", "127.0.0.1")
 
 PROTOCOL_FALLBACK = "2025-06-18"
-WIDGET_URI = "ui://widget/gpt-thinking-block-v5.html"
+WIDGET_URI = "ui://widget/gpt-thinking-block-v6.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
 # The widget is fully self-contained: no fetches, no external assets, no nested
 # frames. Declaring empty CSP domain lists keeps the sandbox at its strictest
@@ -349,26 +349,101 @@ WIDGET_HTML = r"""<!doctype html>
     </div>
   </section>
   <script>
+    // Shared render state. Both bridges write here; paint() renders it.
+    const state = {
+      theme: null,
+      maxHeight: 0,
+      input: {},
+      output: {},
+      responseMeta: {},
+    };
+
+    // ---- Standard MCP Apps bridge (SEP-1865); the view is the MCP client ----
+    const std = (() => {
+      let nextId = 1;
+      let ready = false;
+      const pending = new Map();
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (!data || typeof data !== "object") return;
+        if (data.id !== undefined && pending.has(data.id)) {
+          const p = pending.get(data.id);
+          pending.delete(data.id);
+          if (data.error) p.reject(new Error(JSON.stringify(data.error)));
+          else p.resolve(data.result);
+          return;
+        }
+        if (typeof data.method === "string") {
+          if (data.id !== undefined) {
+            // Host request (e.g. ui/resource-teardown): acknowledge promptly.
+            window.parent.postMessage({ jsonrpc: "2.0", id: data.id, result: {} }, "*");
+          }
+          onHostMessage(data.method, data.params || {});
+        }
+      });
+      function request(method, params) {
+        const id = nextId++;
+        window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          setTimeout(() => {
+            if (pending.has(id)) {
+              pending.delete(id);
+              reject(new Error("timeout"));
+            }
+          }, 4000);
+        });
+      }
+      function notify(method, params) {
+        window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+      }
+      async function start() {
+        try {
+          await request("initialize", {
+            protocolVersion: "2026-01-26",
+            capabilities: {},
+            clientInfo: { name: "gpt-thinking-block", version: "1.0.0" },
+          });
+          const result = await request("ui/initialize", {
+            appCapabilities: { availableDisplayModes: ["inline"] },
+          });
+          if (result && result.hostContext) applyHostContext(result.hostContext);
+          ready = true;
+          notify("ui/notifications/initialized", {});
+        } catch (_) {
+          // Legacy host without the standard bridge: window.openai keeps working.
+          ready = false;
+        }
+      }
+      return { start, notify, isReady: () => ready };
+    })();
+
+    function onHostMessage(method, params) {
+      if (method === "ui/notifications/tool-input") {
+        state.input = params.arguments || {};
+        paint();
+      } else if (method === "ui/notifications/tool-result") {
+        state.responseMeta = (params && params._meta) || {};
+        paint();
+      } else if (method === "ui/notifications/host-context-changed") {
+        applyHostContext(params);
+      }
+    }
+
+    function applyHostContext(context) {
+      if (!context || typeof context !== "object") return;
+      if (context.theme) state.theme = context.theme;
+      const dims = context.containerDimensions;
+      if (dims && Number(dims.maxHeight) > 0) state.maxHeight = Number(dims.maxHeight);
+      paint();
+    }
+
     const card = document.getElementById("card");
     const toggle = document.getElementById("toggle");
     const content = document.getElementById("thinking-content");
-    let heightFrame = 0;
-    let lastMeasuredHeight = -1;
 
-    function requestIntrinsicHeight(force = false) {
-      const host = window.openai || {};
-      if (typeof host.notifyIntrinsicHeight !== "function") return;
-      cancelAnimationFrame(heightFrame);
-      heightFrame = requestAnimationFrame(() => {
-        const measuredHeight = Math.ceil(document.documentElement.scrollHeight);
-        if (!force && measuredHeight === lastMeasuredHeight) return;
-        lastMeasuredHeight = measuredHeight;
-        try { host.notifyIntrinsicHeight(); } catch (_) {}
-      });
-    }
-
-    function applyHostHeightLimit(api) {
-      const maxHeight = Number(api.maxHeight);
+    function applyHostHeightLimit() {
+      const maxHeight = Number(state.maxHeight);
       if (!Number.isFinite(maxHeight) || maxHeight <= 0) {
         content.style.maxHeight = "";
         delete content.dataset.scrollable;
@@ -379,28 +454,44 @@ WIDGET_HTML = r"""<!doctype html>
       content.dataset.scrollable = "true";
     }
 
+    let sizeFrame = 0;
+    let lastMeasuredWidth = -1;
+    let lastMeasuredHeight = -1;
+
+    function reportSize(force = false) {
+      cancelAnimationFrame(sizeFrame);
+      sizeFrame = requestAnimationFrame(() => {
+        const width = Math.ceil(document.documentElement.scrollWidth);
+        const height = Math.ceil(document.documentElement.scrollHeight);
+        if (!force && width === lastMeasuredWidth && height === lastMeasuredHeight) return;
+        lastMeasuredWidth = width;
+        lastMeasuredHeight = height;
+        const host = window.openai || {};
+        if (typeof host.notifyIntrinsicHeight === "function") {
+          try { host.notifyIntrinsicHeight(); } catch (_) {}
+        }
+        if (std.isReady()) {
+          std.notify("ui/notifications/size-changed", { width, height });
+        }
+      });
+    }
+
     function setCollapsed(collapsed) {
       card.dataset.collapsed = collapsed ? "true" : "false";
       toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
       toggle.title = collapsed ? "Expand thinking" : "Collapse thinking";
-      requestIntrinsicHeight(true);
+      reportSize(true);
     }
 
     toggle.addEventListener("click", () => {
       setCollapsed(card.dataset.collapsed !== "true");
     });
 
-    function render(event) {
-      const bridge = window.openai || {};
-      const eventGlobals = event && event.detail && event.detail.globals;
-      // Mobile hosts may publish only the globals that changed. Merge them over
-      // the bridge snapshot instead of replacing the full tool payload.
-      const api = Object.assign({}, bridge,
-        eventGlobals && typeof eventGlobals === "object" ? eventGlobals : {});
-      const input = api.toolInput || {};
-      const output = api.toolOutput || {};
-      const responseMeta = api.toolResponseMetadata || {};
-      if (api.theme) document.documentElement.dataset.theme = api.theme;
+    function paint() {
+      if (state.theme) document.documentElement.dataset.theme = state.theme;
+      const responseMeta = state.responseMeta || {};
+      const input = state.input || {};
+      const output = state.output || {};
       const resultMeta = (responseMeta.mcp_tool_result && responseMeta.mcp_tool_result._meta)
         || (responseMeta.call_tool_result && responseMeta.call_tool_result._meta)
         || responseMeta._meta
@@ -415,14 +506,31 @@ WIDGET_HTML = r"""<!doctype html>
       document.getElementById("effort").textContent = effort ? "EFFORT · " + effort.toUpperCase() : "";
       document.getElementById("skin").textContent = "SKIN · " + skin.toUpperCase();
       document.getElementById("thinking").textContent = resultMeta.thinking || input.thinking || output.thinking || "Thinking block captured.";
-      applyHostHeightLimit(api);
-      requestIntrinsicHeight(true);
+      applyHostHeightLimit();
+      reportSize(true);
     }
-    window.addEventListener("openai:set_globals", render);
+
+    // Legacy OpenAI Apps SDK bridge: window.openai snapshot + set_globals event.
+    function legacySync(event) {
+      const bridge = window.openai || {};
+      const eventGlobals = event && event.detail && event.detail.globals;
+      // Mobile hosts may publish only the globals that changed. Merge them over
+      // the bridge snapshot instead of replacing the full tool payload.
+      const api = Object.assign({}, bridge,
+        eventGlobals && typeof eventGlobals === "object" ? eventGlobals : {});
+      if (api.theme) state.theme = api.theme;
+      if (Number(api.maxHeight) > 0) state.maxHeight = Number(api.maxHeight);
+      if (api.toolInput) state.input = api.toolInput;
+      if (api.toolOutput) state.output = api.toolOutput;
+      if (api.toolResponseMetadata) state.responseMeta = api.toolResponseMetadata;
+      paint();
+    }
+    window.addEventListener("openai:set_globals", legacySync);
     if (typeof ResizeObserver === "function") {
-      new ResizeObserver(() => requestIntrinsicHeight()).observe(document.body);
+      new ResizeObserver(() => reportSize()).observe(document.body);
     }
-    render();
+    std.start();
+    legacySync();
   </script>
 </body>
 </html>"""
@@ -650,7 +758,10 @@ def handle(req):
         }]}}
     if method == "resources/read":
         uri = (req.get("params") or {}).get("uri")
-        if uri != WIDGET_URI:
+        # Serve the current widget for any of our versioned URIs. Hosts cache
+        # tool schemas, so a stale connector may still request v4/v5; honoring
+        # the prefix keeps cached connectors rendering the current bridge.
+        if not (isinstance(uri, str) and uri.startswith("ui://widget/gpt-thinking-block-v")):
             return {"jsonrpc": "2.0", "id": rid,
                     "error": {"code": -32002, "message": f"resource not found: {uri}"}}
         return {"jsonrpc": "2.0", "id": rid, "result": {"contents": [{
