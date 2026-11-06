@@ -128,7 +128,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("#cbdbe1", html)
         self.assertIn('id="skin"', html)
         self.assertIn("SKIN ·", html)
-        self.assertIn("v4.html", server.WIDGET_URI)
+        self.assertIn("v5.html", server.WIDGET_URI)
         self.assertIn("event.detail.globals", html)
         self.assertIn("Object.assign({}, bridge", html)
         self.assertIn("notifyIntrinsicHeight", html)
@@ -136,6 +136,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("lastMeasuredHeight", html)
         self.assertIn("api.maxHeight", html)
         self.assertIn('data-scrollable="true"', html)
+
+    def test_widget_declares_csp_metadata(self):
+        response = server.handle({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "resources/read",
+            "params": {"uri": server.WIDGET_URI},
+        })
+        meta = response["result"]["contents"][0]["_meta"]
+        csp = meta["ui"]["csp"]
+        for key in ("connectDomains", "resourceDomains", "frameDomains", "baseUriDomains"):
+            self.assertIn(key, csp)
+            self.assertEqual(csp[key], [])
+        legacy = meta["openai/widgetCSP"]
+        for key in ("connect_domains", "resource_domains", "frame_domains"):
+            self.assertIn(key, legacy)
+            self.assertEqual(legacy[key], [])
 
     def test_unknown_resource_returns_error(self):
         response = server.handle({

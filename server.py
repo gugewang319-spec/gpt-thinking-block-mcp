@@ -27,8 +27,24 @@ CAPTURE_ENABLED = os.environ.get("CAPTURE_ENABLED", "0").lower() in {"1", "true"
 BIND_HOST = os.environ.get("MCP_BIND", "127.0.0.1")
 
 PROTOCOL_FALLBACK = "2025-06-18"
-WIDGET_URI = "ui://widget/gpt-thinking-block-v4.html"
+WIDGET_URI = "ui://widget/gpt-thinking-block-v5.html"
 WIDGET_MIME = "text/html;profile=mcp-app"
+# The widget is fully self-contained: no fetches, no external assets, no nested
+# frames. Declaring empty CSP domain lists keeps the sandbox at its strictest
+# posture and satisfies hosts that require explicit _meta.ui.csp metadata
+# (MCP Apps, SEP-1865). The snake_case dialect covers legacy OpenAI Apps SDK
+# hosts; both describe the same zero-external policy.
+WIDGET_CSP = {
+    "connectDomains": [],
+    "resourceDomains": [],
+    "frameDomains": [],
+    "baseUriDomains": [],
+}
+WIDGET_CSP_LEGACY = {
+    "connect_domains": [],
+    "resource_domains": [],
+    "frame_domains": [],
+}
 
 
 def normalize_prompt_language(value):
@@ -642,7 +658,8 @@ def handle(req):
             "mimeType": WIDGET_MIME,
             "text": WIDGET_HTML,
             "_meta": {
-                "ui": {"prefersBorder": True},
+                "ui": {"prefersBorder": True, "csp": WIDGET_CSP},
+                "openai/widgetCSP": WIDGET_CSP_LEGACY,
                 "openai/widgetPrefersBorder": True,
                 "openai/widgetDescription": "A readable themed card showing this turn's thinking, style, effort, and skin.",
             },
