@@ -128,14 +128,70 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("#cbdbe1", html)
         self.assertIn('id="skin"', html)
         self.assertIn("SKIN ·", html)
-        self.assertIn("v4.html", server.WIDGET_URI)
+        self.assertIn("v6.html", server.WIDGET_URI)
         self.assertIn("event.detail.globals", html)
         self.assertIn("Object.assign({}, bridge", html)
         self.assertIn("notifyIntrinsicHeight", html)
         self.assertIn("ResizeObserver", html)
         self.assertIn("lastMeasuredHeight", html)
-        self.assertIn("api.maxHeight", html)
+        self.assertIn("state.maxHeight", html)
         self.assertIn('data-scrollable="true"', html)
+
+    def test_widget_declares_csp_metadata(self):
+        response = server.handle({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "resources/read",
+            "params": {"uri": server.WIDGET_URI},
+        })
+        meta = response["result"]["contents"][0]["_meta"]
+        csp = meta["ui"]["csp"]
+        for key in ("connectDomains", "resourceDomains", "frameDomains", "baseUriDomains"):
+            self.assertIn(key, csp)
+            self.assertEqual(csp[key], [])
+        legacy = meta["openai/widgetCSP"]
+        for key in ("connect_domains", "resource_domains", "frame_domains"):
+            self.assertIn(key, legacy)
+            self.assertEqual(legacy[key], [])
+
+    def test_widget_supports_standard_and_legacy_bridges(self):
+        response = server.handle({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "resources/read",
+            "params": {"uri": server.WIDGET_URI},
+        })
+        html = response["result"]["contents"][0]["text"]
+        for marker in (
+            "ui/initialize",
+            "ui/notifications/initialized",
+            "ui/notifications/tool-input",
+            "ui/notifications/tool-result",
+            "ui/notifications/size-changed",
+            "ui/notifications/host-context-changed",
+            "appCapabilities",
+            "appInfo",
+            "protocolVersion",
+        ):
+            self.assertIn(marker, html)
+        self.assertNotIn('request("initialize"', html)
+        for legacy in ("openai:set_globals", "notifyIntrinsicHeight", "event.detail.globals", "window.openai"):
+            self.assertIn(legacy, html)
+
+    def test_legacy_versioned_widget_uri_still_served(self):
+        # Hosts cache tool schemas; a stale connector may request an older
+        # widget URI. The server serves the current widget for any versioned
+        # URI so cached connectors render the current bridge.
+        response = server.handle({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "resources/read",
+            "params": {"uri": "ui://widget/gpt-thinking-block-v4.html"},
+        })
+        content = response["result"]["contents"][0]
+        self.assertEqual(content["mimeType"], "text/html;profile=mcp-app")
+        self.assertIn("ui/initialize", content["text"])
+        self.assertEqual(content["_meta"]["ui"]["csp"]["connectDomains"], [])
 
     def test_unknown_resource_returns_error(self):
         response = server.handle({
