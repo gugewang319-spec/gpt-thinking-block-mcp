@@ -170,8 +170,11 @@ class ProtocolTests(unittest.TestCase):
             "ui/notifications/size-changed",
             "ui/notifications/host-context-changed",
             "appCapabilities",
+            "appInfo",
+            "protocolVersion",
         ):
             self.assertIn(marker, html)
+        self.assertNotIn('request("initialize"', html)
         for legacy in ("openai:set_globals", "notifyIntrinsicHeight", "event.detail.globals", "window.openai"):
             self.assertIn(legacy, html)
 

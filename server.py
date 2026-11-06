@@ -364,17 +364,21 @@ WIDGET_HTML = r"""<!doctype html>
       let ready = false;
       const pending = new Map();
       window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
         const data = event.data;
         if (!data || typeof data !== "object") return;
-        if (data.id !== undefined && pending.has(data.id)) {
-          const p = pending.get(data.id);
-          pending.delete(data.id);
-          if (data.error) p.reject(new Error(JSON.stringify(data.error)));
-          else p.resolve(data.result);
-          return;
+        if (data.jsonrpc !== "2.0") return;
+        if (typeof data.id === "number" || typeof data.id === "string") {
+          if (pending.has(data.id)) {
+            const p = pending.get(data.id);
+            pending.delete(data.id);
+            if (data.error) p.reject(new Error(JSON.stringify(data.error)));
+            else p.resolve(data.result);
+            return;
+          }
         }
         if (typeof data.method === "string") {
-          if (data.id !== undefined) {
+          if (data.id !== undefined && data.id !== null) {
             // Host request (e.g. ui/resource-teardown): acknowledge promptly.
             window.parent.postMessage({ jsonrpc: "2.0", id: data.id, result: {} }, "*");
           }
@@ -399,12 +403,9 @@ WIDGET_HTML = r"""<!doctype html>
       }
       async function start() {
         try {
-          await request("initialize", {
-            protocolVersion: "2026-01-26",
-            capabilities: {},
-            clientInfo: { name: "gpt-thinking-block", version: "1.0.0" },
-          });
           const result = await request("ui/initialize", {
+            protocolVersion: "2026-01-26",
+            appInfo: { name: "gpt-thinking-block", version: "1.0.0" },
             appCapabilities: { availableDisplayModes: ["inline"] },
           });
           if (result && result.hostContext) applyHostContext(result.hostContext);
